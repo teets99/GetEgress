@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 from __future__ import annotations  # enables modern type hint syntax on Python 3.7+
 """
-pa_egress_ips.py — Retrieve and display Prisma Access Egress IPs in a formatted table.
+pa_egress_ips.py — Retrieve Prisma Access GlobalProtect gateway egress IPs,
+display them in a formatted table, and write them to /var/www/html/prisma.txt.
 
 API Used: Prisma Access Datapath API (getPrismaAccessIP/v2)
 Auth:     header-api-key (passed via curl-style command string)
@@ -71,37 +72,14 @@ def parse_curl_command(curl_cmd: str) -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Service type selection
+# Settings
 # ---------------------------------------------------------------------------
 
-SERVICE_TYPES: list[str] = [
-    "all",
-    "remote_network",
-    "gp_gateway",
-    "gp_portal",
-    "clean_pipe",
-    "swg_proxy",
-]
+# Only GlobalProtect gateway addresses are collected
+SERVICE_TYPE: str = "gp_gateway"
 
-
-def prompt_service_type() -> str:
-    """
-    Present a numbered menu of service types and return the user's choice.
-
-    Returns:
-        The selected service type string.
-    """
-    print("\nSelect a service type:")
-    print("-" * 25)
-    for i, svc in enumerate(SERVICE_TYPES, start=1):
-        print(f"  {i}. {svc}")
-    print()
-
-    while True:
-        raw = input("Enter the number for your choice: ").strip()
-        if raw.isdigit() and 1 <= int(raw) <= len(SERVICE_TYPES):
-            return SERVICE_TYPES[int(raw) - 1]
-        print(f"  ✗  Please enter a number between 1 and {len(SERVICE_TYPES)}.")
+# Text file the gateway IPs are written to (one address per line)
+OUTPUT_FILE: str = "/var/www/html/prisma.txt"
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +153,9 @@ def build_table(json_response: dict) -> list[dict]:
     for entry in json_response.get("result", []):
         zone = entry.get("zone", "N/A")
         for addr in entry.get("address_details", []):
+            # Skip anything that is not a gateway address
+            if addr.get("serviceType", SERVICE_TYPE) != SERVICE_TYPE:
+                continue
             row = {
                 "Zone":         zone,
                 "Address":      addr.get("address", ""),
@@ -190,6 +171,34 @@ def build_table(json_response: dict) -> list[dict]:
     return table
 
 
+def write_ip_file(table: list[dict], path: str = OUTPUT_FILE) -> list[str]:
+    """
+    Write the unique gateway IP addresses to a text file, one per line.
+
+    Args:
+        table: Rows produced by build_table().
+        path:  Destination file path.
+
+    Returns:
+        The list of addresses written.
+
+    Raises:
+        SystemExit: If the file cannot be written (e.g. permission denied).
+    """
+    # Preserve API order while removing duplicates
+    addresses = list(dict.fromkeys(row["Address"] for row in table if row["Address"]))
+
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(addresses) + "\n")
+    except PermissionError:
+        sys.exit(f"✗  Permission denied writing {path} — run with sudo or fix permissions.")
+    except OSError as exc:
+        sys.exit(f"✗  Could not write {path}: {exc}")
+
+    return addresses
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -199,8 +208,9 @@ def main() -> None:
     Main workflow:
       1. Prompt user to paste full API command.
       2. Parse API key and URL from that command.
-      3. Prompt for service type.
-      4. Call the API and display results as a formatted table.
+      3. Call the API for GlobalProtect gateway addresses only.
+      4. Display results as a formatted table.
+      5. Write the gateway IPs to OUTPUT_FILE.
     """
     print("=" * 60)
     print("  Prisma Access — Egress IP Lookup")
@@ -223,22 +233,24 @@ def main() -> None:
     print(f"\n  ✔  API key parsed  : {api_key[:6]}{'*' * (len(api_key) - 6)}")
     print(f"  ✔  URL parsed      : {url}")
 
-    # --- Choose service type ---
-    service_type = prompt_service_type()
-    print(f"\n  Fetching egress IPs for service type: {service_type} …\n")
+    print(f"\n  Fetching egress IPs for service type: {SERVICE_TYPE} …\n")
 
     # --- Call the API ---
-    json_response = fetch_egress_ips(url, api_key, service_type)
+    json_response = fetch_egress_ips(url, api_key, SERVICE_TYPE)
 
     # --- Build and print the table ---
     table = build_table(json_response)
 
     if not table:
-        print("  No results returned. The tenant may have no egress IPs for that service type.")
+        print("  No gateway addresses returned. The tenant may have no GlobalProtect gateway egress IPs.")
         return
 
     print(tabulate(table, headers="keys", tablefmt="grid"))
     print(f"\n  Total entries: {len(table)}")
+
+    # --- Write gateway IPs to the text file ---
+    addresses = write_ip_file(table)
+    print(f"  ✔  Wrote {len(addresses)} gateway IP(s) to {OUTPUT_FILE}")
 
 
 if __name__ == "__main__":
